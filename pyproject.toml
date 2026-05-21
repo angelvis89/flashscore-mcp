@@ -3,7 +3,7 @@ name = "flashscore-live-mcp"
 version = "0.2.0.dev0"
 description = "Servidor MCP para consultar marcadores deportivos en vivo con cache y proveedor Flashscore experimental. Subproyecto 'cloud' con browser pool, paralelizacion y deploy a Hugging Face Spaces."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.10.0",
     "playwright>=1.45.0",
@@ -28,7 +28,7 @@ packages = ["src/flashscore_mcp"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
