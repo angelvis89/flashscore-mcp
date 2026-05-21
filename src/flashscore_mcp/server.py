@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any
+
+from mcp.server.fastmcp import FastMCP
+
+from flashscore_mcp.cache import AsyncTTLCache
+from flashscore_mcp.config import Settings
+from flashscore_mcp.models import LiveMatch, LiveSnapshot, MatchDetail, utc_now_iso
+from flashscore_mcp.providers.factory import build_provider
+from flashscore_mcp.services import LivePoller
+from flashscore_mcp.services.poller import live_cache_key
+
+settings = Settings.from_env()
+mcp = FastMCP("flashscore-live-mcp", stateless_http=True, json_response=True)
+provider = build_provider(settings)
+cache: AsyncTTLCache[Any] = AsyncTTLCache()
+poller = LivePoller(cache=cache, provider=provider, settings=settings)
+
+
+async def _live_snapshot(
+    *,
+    sport: str,
+    league: str | None,
+    live_only: bool,
+    force_refresh: bool,
+) -> dict[str, Any]:
+    key = live_cache_key(sport, league, live_only)
+    entry = await cache.get(key)
+    if entry and not force_refresh and not entry.is_stale:
+        snapshot: LiveSnapshot = entry.value
+        return snapshot.to_dict()
+
+    warnings: list[str] = []
+    try:
+        matches = await provider.fetch_live_matches(
+            sport=sport,
+            league=league,
+            live_only=live_only,
+        )
+        snapshot = LiveSnapshot(
+            source=provider.source_name,
+            fetched_at=utc_now_iso(),
+            cache_ttl_seconds=settings.cache_ttl_seconds,
+            stale=False,
+            items=matches,
+            warnings=warnings,
+        )
+        await cache.set(key, snapshot, settings.cache_ttl_seconds)
+        return snapshot.to_dict()
+    except Exception as exc:
+        if entry:
+            snapshot = entry.value
+            fallback = LiveSnapshot(
+                source=snapshot.source,
+                fetched_at=snapshot.fetched_at,
+                cache_ttl_seconds=snapshot.cache_ttl_seconds,
+                stale=True,
+                items=snapshot.items,
+                warnings=[f"Fuente no disponible; se devuelve cache anterior: {exc}"],
+            )
+            return fallback.to_dict()
+        raise
+
+
+@mcp.tool()
+async def get_live_scores(
+    sport: str = "football",
+    league: str | None = None,
+    live_only: bool = True,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Obtiene marcadores deportivos desde cache con refresco controlado."""
+    return await _live_snapshot(
+        sport=sport,
+        league=league,
+        live_only=live_only,
+        force_refresh=force_refresh,
+    )
+
+
+@mcp.tool()
+async def get_match_detail(match_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """Obtiene el detalle resumido de un partido por ID."""
+    key = f"match:{match_id}"
+    entry = await cache.get(key)
+    if entry and not force_refresh and not entry.is_stale:
+        match: LiveMatch = entry.value
+        return {"source": provider.source_name, "stale": False, "item": match.to_dict()}
+
+    try:
+        match = await provider.fetch_match_detail(match_id)
+        if match is None:
+            return {
+                "source": provider.source_name,
+                "stale": False,
+                "item": None,
+                "warnings": ["No se encontro el partido en la fuente actual."],
+            }
+        await cache.set(key, match, settings.cache_ttl_seconds)
+        return {"source": provider.source_name, "stale": False, "item": match.to_dict()}
+    except Exception as exc:
+        if entry:
+            match = entry.value
+            return {
+                "source": provider.source_name,
+                "stale": True,
+                "item": match.to_dict(),
+                "warnings": [f"Fuente no disponible; se devuelve cache anterior: {exc}"],
+            }
+        raise
+
+
+@mcp.tool()
+async def get_matches_by_date(
+    date: str,
+    sport: str = "football",
+    league: str | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Obtiene partidos de una fecha ISO YYYY-MM-DD desde Flashscore."""
+    key = f"date:{sport}:{date}:{league or 'all'}"
+    entry = await cache.get(key)
+    if entry and not force_refresh and not entry.is_stale:
+        snapshot: LiveSnapshot = entry.value
+        return snapshot.to_dict()
+
+    matches = await provider.fetch_matches_by_date(date=date, sport=sport, league=league)
+    snapshot = LiveSnapshot(
+        source=provider.source_name,
+        fetched_at=utc_now_iso(),
+        cache_ttl_seconds=settings.cache_ttl_seconds,
+        stale=False,
+        items=matches,
+    )
+    await cache.set(key, snapshot, settings.cache_ttl_seconds)
+    return snapshot.to_dict()
+
+
+@mcp.tool()
+async def search_matches(
+    query: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sport: str = "football",
+    league: str | None = None,
+) -> dict[str, Any]:
+    """Busca partidos por equipo, liga o texto entre fechas."""
+    matches = await provider.search_matches(
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        sport=sport,
+        league=league,
+    )
+    return {
+        "source": provider.source_name,
+        "fetched_at": utc_now_iso(),
+        "query": query,
+        "items": [match.to_dict() for match in matches],
+    }
+
+
+@mcp.tool()
+async def get_match_full_detail(
+    match_id: str,
+    sections: list[str] | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Obtiene resumen, estadisticas, alineaciones, cuotas, H2H y previa del partido."""
+    requested = sections or ["summary", "statistics", "lineups", "odds", "h2h", "preview"]
+    key = f"full:{match_id}:{','.join(sorted(requested))}"
+    entry = await cache.get(key)
+    if entry and not force_refresh and not entry.is_stale:
+        detail: MatchDetail = entry.value
+        return detail.to_dict()
+
+    detail = await provider.fetch_match_full_detail(match_id=match_id, sections=requested)
+    if detail is None:
+        return {
+            "source": provider.source_name,
+            "fetched_at": utc_now_iso(),
+            "item": None,
+            "warnings": ["No se encontro el partido para extraer detalle completo."],
+        }
+    await cache.set(key, detail, settings.cache_ttl_seconds)
+    return detail.to_dict()
+
+
+@mcp.tool()
+async def get_match_statistics(match_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """Obtiene estadisticas visibles: ataques, posesion, corners, tarjetas, tiros, etc."""
+    return await get_match_full_detail(
+        match_id=match_id,
+        sections=["statistics"],
+        force_refresh=force_refresh,
+    )
+
+
+@mcp.tool()
+async def get_match_odds(match_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """Obtiene cuotas visibles y una estimacion simple del pick mas probable."""
+    return await get_match_full_detail(
+        match_id=match_id,
+        sections=["odds"],
+        force_refresh=force_refresh,
+    )
+
+
+@mcp.tool()
+async def get_match_events(match_id: str, force_refresh: bool = False) -> dict[str, Any]:
+    """Obtiene resumen/timeline visible de eventos del partido."""
+    return await get_match_full_detail(
+        match_id=match_id,
+        sections=["summary"],
+        force_refresh=force_refresh,
+    )
+
+
+@mcp.tool()
+async def watch_match(
+    match_id: str,
+    duration_seconds: int = 30,
+    interval_seconds: int = 5,
+) -> dict[str, Any]:
+    """Observa un partido por polling cacheado y devuelve una serie de muestras."""
+    duration = min(max(duration_seconds, 5), settings.max_watch_seconds)
+    interval = min(max(interval_seconds, 1), duration)
+    samples: list[dict[str, Any]] = []
+    deadline = asyncio.get_running_loop().time() + duration
+
+    while True:
+        samples.append(await get_match_detail(match_id=match_id, force_refresh=True))
+        if asyncio.get_running_loop().time() + interval > deadline:
+            break
+        await asyncio.sleep(interval)
+
+    return {
+        "source": provider.source_name,
+        "match_id": match_id,
+        "duration_seconds": duration,
+        "interval_seconds": interval,
+        "samples": samples,
+    }
+
+
+@mcp.tool()
+async def get_cache_status() -> dict[str, object]:
+    """Muestra estado interno del cache en memoria."""
+    return await cache.status()
+
+
+@mcp.tool()
+async def refresh_live_cache(
+    sport: str = "football",
+    league: str | None = None,
+    live_only: bool = True,
+) -> dict[str, Any]:
+    """Fuerza un refresco unico del snapshot en vivo."""
+    poller.state.sport = sport
+    poller.state.league = league
+    poller.state.live_only = live_only
+    snapshot = await poller.refresh_once()
+    return snapshot.to_dict()
+
+
+@mcp.tool()
+async def start_live_poller(
+    sport: str = "football",
+    league: str | None = None,
+    live_only: bool = True,
+    interval_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Inicia refresco automatico en background para snapshots vivos."""
+    return poller.start(
+        sport=sport,
+        league=league,
+        live_only=live_only,
+        interval_seconds=interval_seconds,
+    )
+
+
+@mcp.tool()
+async def stop_live_poller() -> dict[str, Any]:
+    """Detiene el refresco automatico en background."""
+    return await poller.stop()
+
+
+@mcp.tool()
+async def get_poller_status() -> dict[str, Any]:
+    """Muestra estado del poller interno."""
+    return poller.status()
+
+
+@mcp.resource("sports://football/live")
+async def football_live_resource() -> str:
+    """Snapshot actual de futbol en vivo."""
+    data = await get_live_scores(sport="football", live_only=True)
+    return json.dumps(data, ensure_ascii=False)
+
+
+@mcp.resource("sports://match/{match_id}")
+async def match_resource(match_id: str) -> str:
+    """Detalle resumido de partido por ID."""
+    data = await get_match_full_detail(match_id=match_id)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def main() -> None:
+    mcp.run(transport=settings.transport)
+
+
+if __name__ == "__main__":
+    main()

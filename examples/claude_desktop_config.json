@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "flashscore-live": {
+      "command": "python",
+      "args": ["-m", "flashscore_mcp.server"],
+      "cwd": "C:\\Users\\User\\Desktop\\Crear MCP",
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "SPORTS_PROVIDER": "flashscore"
+      }
+    }
+  }
+}
