@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date as date_type
 from datetime import datetime
@@ -7,6 +8,8 @@ from typing import Any
 
 from flashscore_mcp.config import Settings
 from flashscore_mcp.models import LiveMatch, MatchDetail, MatchScore, MatchSection, utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 class FlashscorePlaywrightProvider:
@@ -206,7 +209,7 @@ class FlashscorePlaywrightProvider:
                     await self._try_live_filter(page)
                 selector = "[id^='g_'], .event__match"
                 await page.wait_for_selector(selector, timeout=self.settings.timeout_ms)
-                return await page.evaluate(
+                rows = await page.evaluate(
                     """
                     ({ targetDate }) => {
                       const selector = "[id^='g_'], .event__match";
@@ -249,16 +252,53 @@ class FlashscorePlaywrightProvider:
                     """,
                     {"targetDate": target_date},
                 )
+                # Diagnostico cuando no se extraen filas (visible en logs).
+                if not rows:
+                    try:
+                        title = await page.title()
+                        body_count = await page.locator(selector).count()
+                        logger.warning(
+                            "Flashscore devolvio 0 filas (titulo='%s', selector_count=%d, url=%s)",
+                            title,
+                            body_count,
+                            url,
+                        )
+                    except Exception:
+                        pass
+                return rows
             finally:
                 await context.close()
                 await browser.close()
 
     async def _try_accept_cookies(self, page: Any) -> None:
-        for label in ("Aceptar", "Acepto", "Consentir", "I Accept"):
+        # Selectores especificos primero (Onetrust + Flashscore propio).
+        specific_selectors = (
+            "#onetrust-accept-btn-handler",
+            "button#onetrust-accept-btn-handler",
+            "button[data-testid='wcl-buttonPrimary']",
+            "button:has-text('AGREE')",
+            "button:has-text('Accept All')",
+        )
+        for sel in specific_selectors:
+            try:
+                loc = page.locator(sel)
+                if await loc.count():
+                    await loc.first.click(timeout=1500)
+                    await page.wait_for_timeout(400)
+                    return
+            except Exception:
+                continue
+        # Fallback por texto/role en varios idiomas.
+        for label in (
+            "Aceptar todo", "Aceptar", "Acepto", "Consentir", "Estoy de acuerdo",
+            "I Accept", "Accept all", "Accept All", "AGREE", "Agree", "OK",
+            "Akzeptieren", "Tout accepter", "Accetta",
+        ):
             try:
                 button = page.get_by_role("button", name=re.compile(label, re.I))
                 if await button.count():
                     await button.first.click(timeout=1500)
+                    await page.wait_for_timeout(400)
                     return
             except Exception:
                 continue
