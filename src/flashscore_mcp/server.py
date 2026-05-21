@@ -17,7 +17,13 @@ from flashscore_mcp.services.poller import live_cache_key
 logger = logging.getLogger(__name__)
 
 settings = Settings.from_env()
-mcp = FastMCP("flashscore-live-mcp", stateless_http=True, json_response=True)
+mcp = FastMCP(
+    "flashscore-live-mcp",
+    stateless_http=True,
+    json_response=True,
+    host=settings.bind_host,
+    port=settings.bind_port,
+)
 provider = build_provider(settings)
 cache: AsyncTTLCache[Any] = AsyncTTLCache()
 poller = LivePoller(cache=cache, provider=provider, settings=settings)
@@ -357,7 +363,8 @@ async def match_resource(match_id: str) -> str:
 def main() -> None:
     transport = settings.transport
     if transport == "streamable-http":
-        _install_http_middleware()
+        _run_http_with_middleware()
+        return
     try:
         mcp.run(transport=transport)
     finally:
@@ -370,20 +377,20 @@ def main() -> None:
             pass
 
 
-def _install_http_middleware() -> None:
-    """Anade auth Bearer + endpoint /healthz al app HTTP de FastMCP.
+def _run_http_with_middleware() -> None:
+    """Lanza uvicorn directamente con auth Bearer + /healthz montados.
 
-    Solo se activa cuando ``transport == 'streamable-http'``. El token se
-    configura via ``MCP_AUTH_TOKEN``. Si no esta definido, no se aplica auth
-    (modo local). El endpoint /healthz nunca exige token.
+    ``mcp.run(transport='streamable-http')`` construye una app Starlette
+    nueva en cada llamada, asi que no podemos pre-modificarla. En su lugar
+    construimos la app aqui, le anadimos middleware + ruta de salud,
+    y la servimos con uvicorn manualmente.
     """
-    try:
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import JSONResponse
-        from starlette.routing import Route
-    except Exception as exc:  # pragma: no cover
-        logger.warning("No se pudo cargar starlette para middleware HTTP: %s", exc)
-        return
+    import uvicorn
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    app = mcp.streamable_http_app()
 
     async def _healthz(_request: Any) -> Any:
         return JSONResponse({"status": "ok", "service": "flashscore-mcp"})
@@ -403,17 +410,30 @@ def _install_http_middleware() -> None:
                 return JSONResponse({"error": "invalid token"}, status_code=403)
             return await call_next(request)
 
-    # FastMCP expone ``streamable_http_app()`` que retorna la Starlette app.
+    app.router.routes.insert(0, Route("/healthz", endpoint=_healthz, methods=["GET"]))
+    app.add_middleware(_BearerAuthMiddleware)
+    logger.info(
+        "HTTP listo en %s:%s (auth=%s, healthz=ON)",
+        settings.bind_host,
+        settings.bind_port,
+        "ON" if expected_token else "OFF",
+    )
+
     try:
-        app = mcp.streamable_http_app()
-        app.add_middleware(_BearerAuthMiddleware)
-        app.router.routes.append(Route("/healthz", endpoint=_healthz, methods=["GET"]))
-        logger.info(
-            "HTTP middleware listo (auth=%s, healthz=ON)",
-            "ON" if expected_token else "OFF",
+        uvicorn.run(
+            app,
+            host=settings.bind_host,
+            port=settings.bind_port,
+            log_level="info",
         )
-    except Exception as exc:  # pragma: no cover
-        logger.warning("No se pudo instalar middleware HTTP: %s", exc)
+    finally:
+        try:
+            from flashscore_mcp.browser_pool import BrowserPool
+
+            pool = BrowserPool.get_instance(settings)
+            asyncio.run(pool.close())
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
