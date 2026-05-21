@@ -1,0 +1,53 @@
+{
+  "name": "flashscore-mcp",
+  "version": "0.2.0.dev0",
+  "description": "MCP server con scraping de Flashscore (marcadores, alineaciones, estadisticas, cuotas)",
+  "license": "MIT",
+  "homepage": "https://huggingface.co/spaces/<usuario>/flashscore-mcp",
+  "language": "python",
+  "runtime": "python>=3.11",
+  "transports": ["stdio", "streamable-http"],
+  "endpoints": {
+    "stdio": {
+      "command": "python",
+      "args": ["-m", "flashscore_mcp.server"],
+      "env": {
+        "MCP_TRANSPORT": "stdio"
+      }
+    },
+    "http": {
+      "url": "https://<usuario>-flashscore-mcp.hf.space/mcp",
+      "auth": {
+        "type": "bearer",
+        "header": "Authorization",
+        "env_var": "MCP_AUTH_TOKEN"
+      },
+      "healthcheck": "/healthz"
+    }
+  },
+  "tools": [
+    "get_live_scores",
+    "get_matches_by_date",
+    "get_match_detail",
+    "get_match_full_detail",
+    "get_match_statistics",
+    "get_match_odds",
+    "get_match_events",
+    "watch_match",
+    "search_matches",
+    "refresh_live_cache",
+    "start_live_poller",
+    "stop_live_poller",
+    "get_poller_status",
+    "get_cache_status"
+  ],
+  "resources": [
+    "sports://football/live",
+    "sports://match/{match_id}"
+  ],
+  "performance_targets": {
+    "live_scores_p95_ms": 3000,
+    "match_full_detail_p95_ms": 10000,
+    "search_7d_p95_ms": 15000
+  }
+}

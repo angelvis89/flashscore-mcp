@@ -1,0 +1,26 @@
+# docker-compose para test local rapido del deploy.
+# Uso: cd cloud; docker compose up --build
+services:
+  flashscore-mcp:
+    build:
+      context: ..
+      dockerfile: cloud/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_BIND_HOST: 0.0.0.0
+      MCP_BIND_PORT: 8000
+      MCP_AUTH_TOKEN: "cambia-este-token-en-produccion"
+      MCP_CORS_ORIGINS: "*"
+      FLASHSCORE_HEADLESS: "true"
+      FLASHSCORE_MAX_CONCURRENT_PAGES: "2"
+      FLASHSCORE_TTL_LIVE_SECONDS: "8"
+      FLASHSCORE_TTL_SCHEDULED_SECONDS: "60"
+      FLASHSCORE_TTL_FINISHED_SECONDS: "86400"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

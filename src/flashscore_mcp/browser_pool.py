@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, BrowserContext, Page, Playwright
+    from playwright.async_api import Browser, Playwright
 
     from flashscore_mcp.config import Settings
 
