@@ -1,7 +1,7 @@
 [project]
 name = "flashscore-live-mcp"
-version = "0.1.1"
-description = "Servidor MCP para consultar marcadores deportivos en vivo con cache y proveedor Flashscore experimental."
+version = "0.2.0.dev0"
+description = "Servidor MCP para consultar marcadores deportivos en vivo con cache y proveedor Flashscore experimental. Subproyecto 'cloud' con browser pool, paralelizacion y deploy a Hugging Face Spaces."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

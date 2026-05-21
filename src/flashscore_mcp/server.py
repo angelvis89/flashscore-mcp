@@ -2,22 +2,52 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from flashscore_mcp.cache import AsyncTTLCache
+from flashscore_mcp.cache import AsyncTTLCache, select_ttl_from_item
 from flashscore_mcp.config import Settings
 from flashscore_mcp.models import LiveMatch, LiveSnapshot, MatchDetail, utc_now_iso
 from flashscore_mcp.providers.factory import build_provider
 from flashscore_mcp.services import LivePoller
 from flashscore_mcp.services.poller import live_cache_key
 
+logger = logging.getLogger(__name__)
+
 settings = Settings.from_env()
 mcp = FastMCP("flashscore-live-mcp", stateless_http=True, json_response=True)
 provider = build_provider(settings)
 cache: AsyncTTLCache[Any] = AsyncTTLCache()
 poller = LivePoller(cache=cache, provider=provider, settings=settings)
+
+
+def _ttl_for_items(items: list[LiveMatch]) -> int:
+    """Devuelve el TTL apropiado segun la mayoria de estados de los partidos."""
+    if not items:
+        return settings.ttl_scheduled_seconds
+    counts = {"live": 0, "scheduled": 0, "finished": 0}
+    for match in items:
+        ttl = select_ttl_from_item(
+            match,
+            live=settings.ttl_live_seconds,
+            scheduled=settings.ttl_scheduled_seconds,
+            finished=settings.ttl_finished_seconds,
+            default=settings.ttl_scheduled_seconds,
+        )
+        if ttl == settings.ttl_live_seconds:
+            counts["live"] += 1
+        elif ttl == settings.ttl_finished_seconds:
+            counts["finished"] += 1
+        else:
+            counts["scheduled"] += 1
+    # Si hay AL MENOS un partido en vivo, refrescamos rapido todo el snapshot.
+    if counts["live"] > 0:
+        return settings.ttl_live_seconds
+    if counts["scheduled"] > 0:
+        return settings.ttl_scheduled_seconds
+    return settings.ttl_finished_seconds
 
 
 async def _live_snapshot(
@@ -48,7 +78,8 @@ async def _live_snapshot(
             items=matches,
             warnings=warnings,
         )
-        await cache.set(key, snapshot, settings.cache_ttl_seconds)
+        ttl = _ttl_for_items(matches)
+        await cache.set(key, snapshot, ttl)
         return snapshot.to_dict()
     except Exception as exc:
         if entry:
@@ -99,7 +130,14 @@ async def get_match_detail(match_id: str, force_refresh: bool = False) -> dict[s
                 "item": None,
                 "warnings": ["No se encontro el partido en la fuente actual."],
             }
-        await cache.set(key, match, settings.cache_ttl_seconds)
+        ttl = select_ttl_from_item(
+            match,
+            live=settings.ttl_live_seconds,
+            scheduled=settings.ttl_scheduled_seconds,
+            finished=settings.ttl_finished_seconds,
+            default=settings.cache_ttl_seconds,
+        )
+        await cache.set(key, match, ttl)
         return {"source": provider.source_name, "stale": False, "item": match.to_dict()}
     except Exception as exc:
         if entry:
@@ -135,7 +173,8 @@ async def get_matches_by_date(
         stale=False,
         items=matches,
     )
-    await cache.set(key, snapshot, settings.cache_ttl_seconds)
+    ttl = _ttl_for_items(matches)
+    await cache.set(key, snapshot, ttl)
     return snapshot.to_dict()
 
 
@@ -185,7 +224,14 @@ async def get_match_full_detail(
             "item": None,
             "warnings": ["No se encontro el partido para extraer detalle completo."],
         }
-    await cache.set(key, detail, settings.cache_ttl_seconds)
+    ttl = select_ttl_from_item(
+        detail.match,
+        live=settings.ttl_live_seconds,
+        scheduled=settings.ttl_scheduled_seconds,
+        finished=settings.ttl_finished_seconds,
+        default=settings.cache_ttl_seconds,
+    )
+    await cache.set(key, detail, ttl)
     return detail.to_dict()
 
 
@@ -309,7 +355,65 @@ async def match_resource(match_id: str) -> str:
 
 
 def main() -> None:
-    mcp.run(transport=settings.transport)
+    transport = settings.transport
+    if transport == "streamable-http":
+        _install_http_middleware()
+    try:
+        mcp.run(transport=transport)
+    finally:
+        try:
+            from flashscore_mcp.browser_pool import BrowserPool
+
+            pool = BrowserPool.get_instance(settings)
+            asyncio.run(pool.close())
+        except Exception:
+            pass
+
+
+def _install_http_middleware() -> None:
+    """Anade auth Bearer + endpoint /healthz al app HTTP de FastMCP.
+
+    Solo se activa cuando ``transport == 'streamable-http'``. El token se
+    configura via ``MCP_AUTH_TOKEN``. Si no esta definido, no se aplica auth
+    (modo local). El endpoint /healthz nunca exige token.
+    """
+    try:
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+    except Exception as exc:  # pragma: no cover
+        logger.warning("No se pudo cargar starlette para middleware HTTP: %s", exc)
+        return
+
+    async def _healthz(_request: Any) -> Any:
+        return JSONResponse({"status": "ok", "service": "flashscore-mcp"})
+
+    expected_token = (settings.auth_token or "").strip()
+
+    class _BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Any, call_next: Any) -> Any:  # type: ignore[override]
+            path = request.url.path or ""
+            if path.startswith("/healthz") or not expected_token:
+                return await call_next(request)
+            header = request.headers.get("authorization", "")
+            if not header.lower().startswith("bearer "):
+                return JSONResponse({"error": "missing bearer token"}, status_code=401)
+            received = header.split(" ", 1)[1].strip()
+            if received != expected_token:
+                return JSONResponse({"error": "invalid token"}, status_code=403)
+            return await call_next(request)
+
+    # FastMCP expone ``streamable_http_app()`` que retorna la Starlette app.
+    try:
+        app = mcp.streamable_http_app()
+        app.add_middleware(_BearerAuthMiddleware)
+        app.router.routes.append(Route("/healthz", endpoint=_healthz, methods=["GET"]))
+        logger.info(
+            "HTTP middleware listo (auth=%s, healthz=ON)",
+            "ON" if expected_token else "OFF",
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("No se pudo instalar middleware HTTP: %s", exc)
 
 
 if __name__ == "__main__":

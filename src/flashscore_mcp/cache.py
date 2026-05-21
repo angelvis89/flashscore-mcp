@@ -3,9 +3,81 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
+
+
+# Marcadores de estado por los que decidimos el TTL estratificado.
+_FINISHED_TOKENS = (
+    "final",
+    "finalizado",
+    "ft",
+    "after pen",
+    "termin",
+    "cancel",
+    "aplaz",
+    "post",
+    "susp",
+    "aban",
+)
+_LIVE_TOKENS = (
+    "vivo",
+    "live",
+    "1er",
+    "2do",
+    "1st",
+    "2nd",
+    "ht",
+    "descanso",
+    "medio",
+    "et",
+    "prol",
+    "pen",
+)
+
+
+def select_ttl(status: str | None, *, live: int, scheduled: int, finished: int) -> int:
+    """Elige TTL en segundos segun el estado del partido.
+
+    - finalizado/cancelado: TTL largo (datos inmutables).
+    - en vivo: TTL corto (datos cambian segundo a segundo).
+    - programado o desconocido: TTL intermedio.
+    """
+    if not status:
+        return scheduled
+    text = status.strip().lower()
+    if not text:
+        return scheduled
+    if any(token in text for token in _FINISHED_TOKENS):
+        return finished
+    if any(token in text for token in _LIVE_TOKENS):
+        return live
+    # Estados puramente numericos (minuto en vivo, ej. "32'") son partidos en vivo
+    if any(ch.isdigit() for ch in text) and "'" in text:
+        return live
+    return scheduled
+
+
+def select_ttl_from_item(
+    item: Any,
+    *,
+    live: int,
+    scheduled: int,
+    finished: int,
+    default: int,
+) -> int:
+    """Helper que inspecciona el atributo `.status` del item si existe."""
+    status: str | None = None
+    if item is None:
+        return default
+    if hasattr(item, "status"):
+        status = getattr(item, "status", None)
+    elif isinstance(item, dict):
+        status = item.get("status")
+    if status is None:
+        return default
+    return select_ttl(status, live=live, scheduled=scheduled, finished=finished)
 
 
 @dataclass
