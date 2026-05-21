@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import asyncio
+import logging
 import re
 from datetime import date as date_type
 from datetime import datetime
 from typing import Any
 
-from flashscore_mcp.browser_pool import BrowserPool
 from flashscore_mcp.config import Settings
 from flashscore_mcp.models import LiveMatch, MatchDetail, MatchScore, MatchSection, utc_now_iso
+
+logger = logging.getLogger(__name__)
 
 
 class FlashscorePlaywrightProvider:
@@ -16,22 +17,12 @@ class FlashscorePlaywrightProvider:
 
     Flashscore no publica una API oficial para este uso. Esta clase esta pensada
     para investigacion o uso interno, con cache y frecuencia conservadora.
-
-    v0.2: usa BrowserPool singleton (1 Chromium reutilizado), bloqueo de
-    recursos pesados, ``wait_for_selector`` dinamico en lugar de sleeps fijos,
-    y paralelizacion con ``asyncio.gather`` para multi-fecha y multi-seccion.
     """
 
     source_name = "flashscore_playwright_experimental"
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._pool = BrowserPool.get_instance(settings)
-        self._min_delay_s = settings.min_request_delay_ms / 1000.0
-
-    async def _delay(self) -> None:
-        if self._min_delay_s > 0:
-            await asyncio.sleep(self._min_delay_s)
 
     async def fetch_live_matches(
         self,
@@ -64,20 +55,15 @@ class FlashscorePlaywrightProvider:
             if match.match_id == match_id:
                 return match
         # Fallback: el partido puede ser de un dia previo (finalizado). Buscamos
-        # en los ultimos 7 dias en PARALELO (limitado por semaphore del pool).
+        # en los ultimos 7 dias antes de rendirnos.
         from datetime import date, timedelta
-
         today = date.today()
-        days = [(today - timedelta(days=delta)).isoformat() for delta in range(1, 8)]
-
-        async def _safe(day: str) -> list[LiveMatch]:
+        for delta in range(1, 8):
+            day = (today - timedelta(days=delta)).isoformat()
             try:
-                return await self.fetch_matches_by_date(date=day)
+                day_matches = await self.fetch_matches_by_date(date=day)
             except Exception:
-                return []
-
-        results = await asyncio.gather(*(_safe(day) for day in days))
-        for day_matches in results:
+                continue
             for match in day_matches:
                 if match.match_id == match_id:
                     return match
@@ -111,20 +97,12 @@ class FlashscorePlaywrightProvider:
         dates = self._date_range(date_from, date_to)
         needle = query.lower()
         found: dict[str, LiveMatch] = {}
-
-        async def _safe(day: date_type) -> list[LiveMatch]:
-            try:
-                return await self.fetch_matches_by_date(
-                    date=day.isoformat(), sport=sport, league=league
-                )
-            except Exception:
-                return []
-
-        # Paralelizar la busqueda multi-dia. El BrowserPool limita la
-        # concurrencia real via su semaphore (max_concurrent_pages).
-        results = await asyncio.gather(*(_safe(day) for day in dates))
-        for day_matches in results:
-            for match in day_matches:
+        for day in dates:
+            for match in await self.fetch_matches_by_date(
+                date=day.isoformat(),
+                sport=sport,
+                league=league,
+            ):
                 haystack = f"{match.home} {match.away} {match.league} {match.raw_text}".lower()
                 if needle in haystack:
                     found[match.match_id] = match
@@ -137,49 +115,52 @@ class FlashscorePlaywrightProvider:
         sections: list[str] | None = None,
     ) -> MatchDetail | None:
         match = await self.fetch_match_detail(match_id)
-        if match is None:
-            return None
+        synthetic = match is None
+        if synthetic:
+            # Partido no encontrado en el listado del dia actual (tipico de partidos
+            # finalizados de dias anteriores). Construimos una URL canonica directa
+            # usando el patron /match/<mid>/ y delegamos a la pagina de detalle.
+            direct_url = f"{self.settings.base_url.rstrip('/')}/match/{match_id}/"
+            match = LiveMatch(
+                match_id=match_id,
+                home="",
+                away="",
+                url=direct_url,
+            )
         detail_url = match.url or f"{self.settings.base_url.rstrip('/')}/match/{match_id}/"
         base_url = self._base_match_url(detail_url)
         mid = self._match_mid(detail_url, match_id)
         requested = sections or ["summary", "statistics", "lineups", "odds", "h2h", "preview"]
+        result_sections: dict[str, MatchSection] = {}
 
-        # Header: cargar la URL base 1 vez para obtener el header del partido.
-        async with self._pool.page() as (_ctx_header, page_header):
-            await self._delay()
-            await page_header.goto(base_url, wait_until="domcontentloaded")
-            await self._try_accept_cookies(page_header)
-            try:
-                await page_header.wait_for_selector(
-                    ".duelParticipant__home, .detailScore__wrapper", timeout=5000
-                )
-            except Exception:
-                pass
-            header = await self._extract_detail_header(page_header)
-            if header:
-                match = self._merge_match_header(match, header)
+        from playwright.async_api import async_playwright
 
-        # Secciones: paralelizar con asyncio.gather. Cada seccion abre su propia
-        # page del pool (el semaphore interno limita la concurrencia real).
-        async def _run(section: str) -> tuple[str, MatchSection]:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.settings.headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(locale="es-PE", timezone_id="America/Lima")
+            page = await context.new_page()
+            page.set_default_timeout(self.settings.timeout_ms)
             try:
-                async with self._pool.page() as (_ctx, page):
-                    await self._delay()
-                    await page.goto(base_url, wait_until="domcontentloaded")
-                    await self._try_accept_cookies(page)
-                    result = await self._extract_detail_section(
-                        page, section=section, base_url=base_url, mid=mid
+                await page.goto(base_url, wait_until="domcontentloaded")
+                await self._try_accept_cookies(page)
+                await page.wait_for_timeout(1500)
+                header = await self._extract_detail_header(page)
+                if header:
+                    match = self._merge_match_header(match, header)
+
+                for section in requested:
+                    result_sections[section] = await self._extract_detail_section(
+                        page,
+                        section=section,
+                        base_url=base_url,
+                        mid=mid,
                     )
-                return section, result
-            except Exception as exc:
-                return section, MatchSection(
-                    name=section,
-                    available=False,
-                    warnings=[f"No se pudo extraer la seccion: {exc}"],
-                )
-
-        pairs = await asyncio.gather(*(_run(s) for s in requested))
-        result_sections: dict[str, MatchSection] = dict(pairs)
+            finally:
+                await context.close()
+                await browser.close()
 
         return MatchDetail(
             match=match,
@@ -201,69 +182,123 @@ class FlashscorePlaywrightProvider:
         live_only: bool,
         target_date: str | None = None,
     ) -> list[dict[str, Any]]:
-        async with self._pool.page() as (_context, page):
-            await self._delay()
-            await page.goto(url, wait_until="domcontentloaded")
-            await self._try_accept_cookies(page)
-            if target_date:
-                await self._navigate_to_date(page, target_date)
-            if live_only:
-                await self._try_live_filter(page)
-            selector = "[id^='g_'], .event__match"
-            try:
-                await page.wait_for_selector(selector, timeout=self.settings.timeout_ms)
-            except Exception:
-                return []
-            return await page.evaluate(
-                """
-                ({ targetDate }) => {
-                  const selector = "[id^='g_'], .event__match";
-                  const rows = Array.from(document.querySelectorAll(selector));
-                  return rows.map((el) => {
-                    const text = (query) => {
-                      return el.querySelector(query)?.textContent?.trim() || null;
-                    };
-                    const leagueHeader = (() => {
-                      let node = el.previousElementSibling;
-                      while (node) {
-                        if (String(node.className).includes("headerLeague")) {
-                          return node.textContent?.replace(/\\s+/g, " ")?.trim() || null;
-                        }
-                        node = node.previousElementSibling;
-                      }
-                      return null;
-                    })();
-                    return {
-                      id: el.id || el.getAttribute("data-id") || null,
-                      href: el.querySelector("a.eventRowLink")?.href || null,
-                      home: text(".event__homeParticipant")
-                        || text(".event__participant--home"),
-                      away: text(".event__awayParticipant")
-                        || text(".event__participant--away"),
-                      homeScore: text(".event__score--home"),
-                      awayScore: text(".event__score--away"),
-                      status: text(".event__stage"),
-                      time: text(".event__time"),
-                      league: leagueHeader,
-                      targetDate,
-                      betting: Boolean(el.querySelector("[data-testid*='badgeLiveBet']")),
-                      tv: Boolean(el.querySelector(".event__icon--tv")),
-                      favorite: Boolean(el.querySelector("[data-testid*='favorite']")),
-                      innerText: el.innerText || null,
-                      rawText: el.textContent?.replace(/\\s+/g, " ")?.trim() || null,
-                    };
-                  });
-                }
-                """,
-                {"targetDate": target_date},
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=self.settings.headless,
+                args=["--disable-blink-features=AutomationControlled"],
             )
+            context = await browser.new_context(
+                locale="es-PE",
+                timezone_id="America/Lima",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/126.0.0.0 Safari/537.36"
+                ),
+            )
+            page = await context.new_page()
+            page.set_default_timeout(self.settings.timeout_ms)
+            try:
+                await page.goto(url, wait_until="domcontentloaded")
+                await self._try_accept_cookies(page)
+                if target_date:
+                    await self._navigate_to_date(page, target_date)
+                if live_only:
+                    await self._try_live_filter(page)
+                selector = "[id^='g_'], .event__match"
+                await page.wait_for_selector(selector, timeout=self.settings.timeout_ms)
+                rows = await page.evaluate(
+                    """
+                    ({ targetDate }) => {
+                      const selector = "[id^='g_'], .event__match";
+                      const rows = Array.from(document.querySelectorAll(selector));
+                      return rows.map((el) => {
+                        const text = (query) => {
+                          return el.querySelector(query)?.textContent?.trim() || null;
+                        };
+                        const leagueHeader = (() => {
+                          let node = el.previousElementSibling;
+                          while (node) {
+                            if (String(node.className).includes("headerLeague")) {
+                              return node.textContent?.replace(/\\s+/g, " ")?.trim() || null;
+                            }
+                            node = node.previousElementSibling;
+                          }
+                          return null;
+                        })();
+                        return {
+                          id: el.id || el.getAttribute("data-id") || null,
+                          href: el.querySelector("a.eventRowLink")?.href || null,
+                          home: text(".event__homeParticipant")
+                            || text(".event__participant--home"),
+                          away: text(".event__awayParticipant")
+                            || text(".event__participant--away"),
+                          homeScore: text(".event__score--home"),
+                          awayScore: text(".event__score--away"),
+                          status: text(".event__stage"),
+                          time: text(".event__time"),
+                          league: leagueHeader,
+                          targetDate,
+                          betting: Boolean(el.querySelector("[data-testid*='badgeLiveBet']")),
+                          tv: Boolean(el.querySelector(".event__icon--tv")),
+                          favorite: Boolean(el.querySelector("[data-testid*='favorite']")),
+                          innerText: el.innerText || null,
+                          rawText: el.textContent?.replace(/\\s+/g, " ")?.trim() || null,
+                        };
+                      });
+                    }
+                    """,
+                    {"targetDate": target_date},
+                )
+                # Diagnostico cuando no se extraen filas (visible en logs).
+                if not rows:
+                    try:
+                        title = await page.title()
+                        body_count = await page.locator(selector).count()
+                        logger.warning(
+                            "Flashscore devolvio 0 filas (titulo='%s', selector_count=%d, url=%s)",
+                            title,
+                            body_count,
+                            url,
+                        )
+                    except Exception:
+                        pass
+                return rows
+            finally:
+                await context.close()
+                await browser.close()
 
     async def _try_accept_cookies(self, page: Any) -> None:
-        for label in ("Aceptar", "Acepto", "Consentir", "I Accept"):
+        # Selectores especificos primero (Onetrust + Flashscore propio).
+        specific_selectors = (
+            "#onetrust-accept-btn-handler",
+            "button#onetrust-accept-btn-handler",
+            "button[data-testid='wcl-buttonPrimary']",
+            "button:has-text('AGREE')",
+            "button:has-text('Accept All')",
+        )
+        for sel in specific_selectors:
+            try:
+                loc = page.locator(sel)
+                if await loc.count():
+                    await loc.first.click(timeout=1500)
+                    await page.wait_for_timeout(400)
+                    return
+            except Exception:
+                continue
+        # Fallback por texto/role en varios idiomas.
+        for label in (
+            "Aceptar todo", "Aceptar", "Acepto", "Consentir", "Estoy de acuerdo",
+            "I Accept", "Accept all", "Accept All", "AGREE", "Agree", "OK",
+            "Akzeptieren", "Tout accepter", "Accetta",
+        ):
             try:
                 button = page.get_by_role("button", name=re.compile(label, re.I))
                 if await button.count():
                     await button.first.click(timeout=1500)
+                    await page.wait_for_timeout(400)
                     return
             except Exception:
                 continue
@@ -299,15 +334,15 @@ class FlashscorePlaywrightProvider:
             try:
                 await page.locator("[data-testid='wcl-dayPickerButton']").filter(
                     has_not_text=previous_date
-                ).wait_for(timeout=3500)
+                ).wait_for(timeout=5000)
             except Exception:
-                continue
+                await page.wait_for_timeout(1800)
         try:
             await page.locator("[data-testid='wcl-dayPickerButton']").filter(
                 has_text=expected
-            ).wait_for(timeout=3500)
+            ).wait_for(timeout=5000)
         except Exception:
-            pass
+            await page.wait_for_timeout(2500)
 
     async def _visible_date_text(self, page: Any) -> str:
         try:
@@ -473,14 +508,7 @@ class FlashscorePlaywrightProvider:
                     timeout=self.settings.timeout_ms,
                 )
 
-            # Espera dinamica: tan pronto el body tenga contenido, seguimos.
-            try:
-                await page.wait_for_selector(
-                    ".duelParticipant, .lf__lineUp, [class*='preview'], [class*='stat']",
-                    timeout=4000,
-                )
-            except Exception:
-                pass
+            await page.wait_for_timeout(2200)
             raw_text = (await page.locator("body").inner_text(timeout=4000)).strip()
             useful = self._slice_section_text(raw_text)
             data = await self._extract_structured_section(page, section)
@@ -756,10 +784,7 @@ class FlashscorePlaywrightProvider:
                 locator = page.get_by_text(label, exact=False)
                 if await locator.count():
                     await locator.first.click(timeout=2500)
-                    try:
-                        await page.wait_for_load_state("domcontentloaded", timeout=2000)
-                    except Exception:
-                        pass
+                    await page.wait_for_timeout(1000)
                     return
             except Exception:
                 continue
@@ -771,10 +796,10 @@ class FlashscorePlaywrightProvider:
         await self._open_tab_by_text(page, "Alineaciones")
         # Esperar a que el widget de alineaciones aparezca en el DOM
         try:
-            await page.wait_for_selector(".lf__lineUp", timeout=6000)
+            await page.wait_for_selector(".lf__lineUp", timeout=8000)
         except Exception:
             # Tolerar partidos sin alineaciones publicadas todavia
-            return
+            await page.wait_for_timeout(1200)
 
     async def _open_tab_by_text(self, page: Any, label: str) -> None:
         # Intentar varias variantes (DOM tiene capitalizada, no MAYUSCULA)
@@ -793,13 +818,8 @@ class FlashscorePlaywrightProvider:
             if not count:
                 continue
             try:
-                await locator.first.click(timeout=2500)
-                # En vez de sleep fijo, esperar a un cambio en el DOM tipico
-                # de cuando se renderiza una pestana.
-                try:
-                    await page.wait_for_load_state("domcontentloaded", timeout=2500)
-                except Exception:
-                    pass
+                await locator.first.click(timeout=3000)
+                await page.wait_for_timeout(2000)
                 return
             except Exception:
                 continue
@@ -810,7 +830,8 @@ class FlashscorePlaywrightProvider:
             pattern = _re.compile(rf"^\s*{_re.escape(label)}\s*$", _re.IGNORECASE)
             locator = page.get_by_text(pattern)
             if await locator.count():
-                await locator.first.click(timeout=2500)
+                await locator.first.click(timeout=3000)
+                await page.wait_for_timeout(2000)
         except Exception:
             return
 
@@ -835,38 +856,22 @@ class FlashscorePlaywrightProvider:
         }
         data: dict[str, Any] = {"markets": {}, "best_recommendations": []}
         raw_parts: list[str] = []
-
-        # Paralelizar la consulta de los N mercados con asyncio.gather + pool.
-        async def _one_market(name: str, path: str) -> tuple[str, dict[str, Any], str]:
+        for name, path in markets.items():
             url = f"{base_url}cuotas/{path}?mid={mid}"
             try:
-                async with self._pool.page() as (_ctx, page2):
-                    await self._delay()
-                    await page2.goto(
-                        url,
-                        wait_until="domcontentloaded",
-                        timeout=self.settings.timeout_ms,
-                    )
-                    try:
-                        await page2.wait_for_selector(
-                            "[class*='odds'], [class*='bookmaker']", timeout=4000
-                        )
-                    except Exception:
-                        pass
-                    text = (await page2.locator("body").inner_text(timeout=5000)).strip()
+                await page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=self.settings.timeout_ms,
+                )
+                await page.wait_for_timeout(1800)
+                text = (await page.locator("body").inner_text(timeout=5000)).strip()
                 lines = [line.strip() for line in text.splitlines() if line.strip()]
                 market_data = self._parse_odds_market(name, lines)
-                return name, market_data, "## " + name + "\n" + "\n".join(lines[:120])
+                data["markets"][name] = market_data
+                raw_parts.append(f"## {name}\n" + "\n".join(lines[:120]))
             except Exception as exc:
-                return name, {"available": False, "error": str(exc)}, ""
-
-        results = await asyncio.gather(
-            *(_one_market(name, path) for name, path in markets.items())
-        )
-        for name, market_data, raw in results:
-            data["markets"][name] = market_data
-            if raw:
-                raw_parts.append(raw)
+                data["markets"][name] = {"available": False, "error": str(exc)}
 
         data["best_recommendations"] = self._build_betting_recommendations(data["markets"])
         return MatchSection(
