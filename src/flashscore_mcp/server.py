@@ -392,6 +392,21 @@ def _run_http_with_middleware() -> None:
 
     app = mcp.streamable_http_app()
 
+    # ---- Warmup del browser en startup (solo modo fast) ----
+    if (
+        settings.sports_provider.strip().lower() in {"flashscore_fast", "fast"}
+        and getattr(settings, "fast_warmup_on_startup", False)
+    ):
+        @app.on_event("startup")
+        async def _warmup() -> None:  # pragma: no cover - integracion startup
+            warm = getattr(provider, "warmup", None)
+            if callable(warm):
+                logger.info("Iniciando warmup del browser (modo fast)...")
+                try:
+                    await warm()
+                except Exception as exc:
+                    logger.warning("Warmup fallo: %s", exc)
+
     async def _healthz(_request: Any) -> Any:
         return JSONResponse({"status": "ok", "service": "flashscore-mcp"})
 

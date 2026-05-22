@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -149,11 +150,12 @@ class BrowserPool:
 
         - Limita la concurrencia segun ``settings.max_concurrent_pages``.
         - Instala bloqueo de recursos pesados via ``route``.
+        - Si existe ``settings.storage_state_path`` valido, lo carga (cookies cacheadas).
         - Cierra el context al salir (no el browser, que es persistente).
         """
         async with self._page_semaphore:
             browser = await self._ensure_browser()
-            context = await browser.new_context(
+            context_kwargs: dict[str, Any] = dict(
                 locale="es-PE",
                 timezone_id="America/Lima",
                 viewport={"width": 1280, "height": 720},
@@ -164,6 +166,13 @@ class BrowserPool:
                 ),
                 extra_http_headers={"Accept-Language": "es-PE,es;q=0.9"},
             )
+            state_path = getattr(self.settings, "storage_state_path", "") or ""
+            if state_path and os.path.isfile(state_path):
+                try:
+                    context_kwargs["storage_state"] = state_path
+                except Exception:
+                    pass
+            context = await browser.new_context(**context_kwargs)
             try:
                 await context.route("**/*", _block_route)
                 page = await context.new_page()
@@ -174,6 +183,18 @@ class BrowserPool:
                     await context.close()
                 except Exception:
                     pass
+
+    async def save_storage_state(self, context: Any) -> None:
+        """Persiste cookies + localStorage del context a disco para reuso."""
+        state_path = getattr(self.settings, "storage_state_path", "") or ""
+        if not state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(state_path) or ".", exist_ok=True)
+            await context.storage_state(path=state_path)
+            logger.info("storage_state guardado en %s", state_path)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("No se pudo guardar storage_state: %s", exc)
 
     async def close(self) -> None:
         async with self._lock:

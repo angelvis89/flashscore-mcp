@@ -10,3 +10,7 @@ build/
 *.egg-info/
 playwright-report/
 test-results/
+
+.playwright-mcp/
+_smoke_local.py
+

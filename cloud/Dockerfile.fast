@@ -1,0 +1,48 @@
+# Dockerfile.fast - version paralela del Flashscore MCP optimizada.
+# Cambios vs Dockerfile baseline:
+#  - SPORTS_PROVIDER=flashscore_fast (usa BrowserPool + paralelizacion + cache L3)
+#  - FLASHSCORE_MAX_CONCURRENT_PAGES=6 (una pagina por seccion de detalle)
+#  - FLASHSCORE_TTL_LIVE_SECONDS=60 (acompaña el cron de precache cada 30 min)
+#  - Warmup activado: el browser arranca con cookies precargadas en startup
+#  - FLASHSCORE_STATIC_CACHE_URL: si se pasa, lee cache L3 antes de Playwright
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MCP_TRANSPORT=streamable-http \
+    MCP_BIND_HOST=0.0.0.0 \
+    MCP_BIND_PORT=8000 \
+    SPORTS_PROVIDER=flashscore_fast \
+    FLASHSCORE_TIMEOUT_MS=20000 \
+    FLASHSCORE_MAX_CONCURRENT_PAGES=6 \
+    FLASHSCORE_FAST_PARALLEL_SECTIONS=6 \
+    FLASHSCORE_FAST_WARMUP=true \
+    FLASHSCORE_HEADLESS=true \
+    FLASHSCORE_TTL_LIVE_SECONDS=60 \
+    FLASHSCORE_TTL_SCHEDULED_SECONDS=300 \
+    FLASHSCORE_STORAGE_STATE_PATH=/tmp/flashscore_state.json \
+    FLASHSCORE_STATIC_CACHE_MAX_AGE=900 \
+    FLASHSCORE_STATIC_CACHE_TIMEOUT=2.0
+
+RUN useradd -ms /bin/bash mcpuser
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY src ./src
+COPY README.md ./
+
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install . && \
+    pip install httpx && \
+    chown -R mcpuser:mcpuser /app
+
+USER mcpuser
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8000/healthz || exit 1
+
+CMD ["python", "-m", "flashscore_mcp.server"]

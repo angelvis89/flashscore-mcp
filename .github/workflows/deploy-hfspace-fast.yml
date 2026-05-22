@@ -1,0 +1,65 @@
+name: deploy-hfspace-fast
+
+# Despliega la version FAST del MCP a un HF Space paralelo, sin afectar el
+# Space actual. Permite A/B real con clientes.
+#
+# Requiere secrets:
+#   HF_TOKEN            - token HF con scope write
+#   HF_SPACE_REPO_FAST  - slug del Space fast, ej: "angelvis89/flashscore-mcp-fast"
+#
+# Variables del Space (configurar en HF UI Settings -> Variables):
+#   MCP_AUTH_TOKEN              (secret) - Bearer para autenticar al MCP
+#   FLASHSCORE_STATIC_CACHE_URL          - https://<user>.github.io/flashscore-mcp
+on:
+  push:
+    branches: [cloud-fast]
+    paths:
+      - "src/**"
+      - "cloud/Dockerfile.fast"
+      - "cloud/README.md"
+      - "pyproject.toml"
+      - ".github/workflows/deploy-hfspace-fast.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar huggingface_hub
+        run: pip install --upgrade huggingface_hub
+
+      - name: Empaquetar contexto del Space FAST
+        run: |
+          mkdir -p hf-space-fast
+          cp -r src hf-space-fast/src
+          cp cloud/Dockerfile.fast hf-space-fast/Dockerfile
+          cp cloud/README.md hf-space-fast/README.md
+          cp pyproject.toml hf-space-fast/pyproject.toml
+
+      - name: Subir al Hugging Face Space FAST
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO_FAST }}
+        run: |
+          python <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          repo = os.environ["HF_SPACE_REPO"]
+          api.upload_folder(
+              folder_path="hf-space-fast",
+              repo_id=repo,
+              repo_type="space",
+              commit_message="auto-deploy FAST desde cloud-fast",
+          )
+          print(f"Deploy FAST OK -> https://huggingface.co/spaces/{repo}")
+          PY

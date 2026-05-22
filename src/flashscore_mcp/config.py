@@ -45,6 +45,22 @@ class Settings:
     cors_origins: str = "*"
     bind_host: str = "0.0.0.0"
     bind_port: int = 8000
+    # ---- Modo FAST (FlashscoreFastProvider) ----
+    # Numero de paginas paralelas para extraer secciones de fetch_match_full_detail.
+    # 6 = una pagina por seccion (max velocidad, ~600MB RAM).
+    fast_parallel_sections: int = 6
+    # Path local donde se persiste el storage_state (cookies aceptadas) entre runs.
+    storage_state_path: str = "/tmp/flashscore_state.json"
+    # Si True, el server hace warmup del browser + cookies al startup (lifespan).
+    fast_warmup_on_startup: bool = True
+    # ---- Cache L3 estatico via GitHub Pages (publicado por precache.yml) ----
+    # Ejemplo: https://angelvis89.github.io/flashscore-mcp
+    # Si esta vacio, el provider Fast NO intenta cache estatico (cae directo a Playwright).
+    static_cache_base_url: str = ""
+    # Edad maxima aceptable del cache estatico (segundos). Mayor = mas hits, menos frescura.
+    static_cache_max_age_seconds: int = 600
+    # Timeout HTTP corto: si Pages no responde rapido, fallback a Playwright sin esperar.
+    static_cache_timeout_seconds: float = 2.0
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -88,4 +104,29 @@ class Settings:
             cors_origins=os.getenv("MCP_CORS_ORIGINS", cls.cors_origins),
             bind_host=os.getenv("MCP_BIND_HOST", cls.bind_host),
             bind_port=_as_int(os.getenv("MCP_BIND_PORT"), cls.bind_port, minimum=1),
+            fast_parallel_sections=_as_int(
+                os.getenv("FLASHSCORE_FAST_PARALLEL_SECTIONS"),
+                cls.fast_parallel_sections,
+                minimum=1,
+            ),
+            storage_state_path=os.getenv(
+                "FLASHSCORE_STORAGE_STATE_PATH", cls.storage_state_path
+            ),
+            fast_warmup_on_startup=_as_bool(
+                os.getenv("FLASHSCORE_FAST_WARMUP"), cls.fast_warmup_on_startup
+            ),
+            static_cache_base_url=os.getenv(
+                "FLASHSCORE_STATIC_CACHE_URL", cls.static_cache_base_url
+            ),
+            static_cache_max_age_seconds=_as_int(
+                os.getenv("FLASHSCORE_STATIC_CACHE_MAX_AGE"),
+                cls.static_cache_max_age_seconds,
+                minimum=10,
+            ),
+            static_cache_timeout_seconds=float(
+                os.getenv(
+                    "FLASHSCORE_STATIC_CACHE_TIMEOUT",
+                    str(cls.static_cache_timeout_seconds),
+                )
+            ),
         )

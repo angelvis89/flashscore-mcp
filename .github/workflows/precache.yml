@@ -1,0 +1,71 @@
+name: precache
+
+# Scrapea Flashscore con Playwright en el runner y publica snapshots JSON
+# a la rama `data`, servida por GitHub Pages. El MCP runtime los lee como
+# cache L3 (latencia <300ms via CDN Fastly) antes de tocar Playwright.
+#
+# IMPORTANTE - presupuesto:
+#   Cada run ~2 min. */15 en ventana 12-04 UTC = ~64 runs/dia ~= 4000 min/mes.
+#   Esto excede los 2000 min gratis. Ajustar cron o usar self-hosted runner.
+#   Default conservador: cada 30 min en ventana 12-04 UTC.
+#
+# Para activar:
+#   1. Settings -> Pages -> Source: Deploy from branch `data` / `/ (root)`
+#   2. (opcional) Variables: PRECACHE_TOP_N, PRECACHE_DATE_DAYS
+on:
+  schedule:
+    # Cada 30 min, 12:00 a 03:30 UTC (cubre Europa tarde + America)
+    - cron: "0,30 12-23,0-3 * * *"
+  workflow_dispatch:
+    inputs:
+      top_n:
+        description: "Top-N partidos para precache de detalle"
+        default: "20"
+        required: false
+
+jobs:
+  precache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout rama cloud-fast
+        uses: actions/checkout@v4
+        with:
+          ref: cloud-fast
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          python -m playwright install --with-deps chromium
+
+      - name: Ejecutar precache
+        env:
+          PRECACHE_OUTPUT_DIR: ./public
+          PRECACHE_TOP_N: ${{ github.event.inputs.top_n || '20' }}
+          PRECACHE_DATE_DAYS: "1"
+          FLASHSCORE_HEADLESS: "1"
+          FLASHSCORE_TIMEOUT_MS: "20000"
+        run: python scripts/precache.py
+
+      - name: Verificar output
+        run: |
+          ls -lR public || true
+          echo "Total snapshots: $(find public -name '*.json' | wc -l)"
+
+      - name: Publicar a rama data (GitHub Pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: data
+          force_orphan: false
+          commit_message: "precache: ${{ github.sha }} @ ${{ github.run_id }}"
