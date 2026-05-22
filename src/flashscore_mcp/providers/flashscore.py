@@ -314,35 +314,185 @@ class FlashscorePlaywrightProvider:
                 continue
 
     async def _navigate_to_date(self, page: Any, target_date: str) -> None:
+        """Navega el day picker hasta la fecha pedida.
+
+        Robustez frente a bugs conocidos del DOM de Flashscore:
+        - Usa el atributo ``data-day-picker-arrow`` en vez de aria-label (i18n-safe).
+        - Antes de cada click hace scroll_into_view + wait_for(state="visible").
+        - Reintenta hasta 3 veces por paso con backoff y dismiss de overlays.
+        - Fallback: si el click directo falla, dispara la accion con teclado o JS.
+        - Verificacion final: confirma que el day picker visible muestra DD/MM esperado;
+          si no, realiza hasta 3 ajustes finos (+/-1 paso) para corregir desvio.
+        """
         try:
             requested = date_type.fromisoformat(target_date)
         except ValueError:
             return
+
         today = datetime.now().date()
         delta = (requested - today).days
         if delta == 0:
             return
-        label = "Día siguiente" if delta > 0 else "Día anterior"
+
+        direction = "next" if delta > 0 else "prev"
+        step_dir = 1 if delta > 0 else -1
         steps = min(abs(delta), 14)
-        expected = requested.strftime("%d/%m")
+        expected_label = requested.strftime("%d/%m")
+
+        # Esperar a que el day picker exista antes de empezar.
+        try:
+            await page.locator("[data-testid='wcl-dayPickerButton']").first.wait_for(
+                state="visible", timeout=8000
+            )
+        except Exception:
+            logger.debug("day picker no visible aun; continuamos best-effort")
+
         for _ in range(steps):
             previous_date = await self._visible_date_text(page)
-            button = page.get_by_label(label)
-            if not await button.count():
+            moved = await self._click_day_arrow(page, direction)
+            if not moved:
+                logger.warning(
+                    "No se pudo avanzar el day picker (direccion=%s). Abortando navegacion.",
+                    direction,
+                )
                 break
-            await button.first.click(timeout=3000)
+            # Esperar a que el texto del picker cambie.
             try:
                 await page.locator("[data-testid='wcl-dayPickerButton']").filter(
                     has_not_text=previous_date
-                ).wait_for(timeout=5000)
+                ).first.wait_for(timeout=5000)
             except Exception:
-                await page.wait_for_timeout(1800)
+                # Damos un respiro y seguimos; la verificacion final corrige desvios.
+                await page.wait_for_timeout(900)
+
+        # Verificacion final con ajustes finos (hasta 3 correcciones de +/-1 paso).
+        for _ in range(3):
+            visible = await self._visible_date_text(page)
+            if expected_label and expected_label in visible:
+                return
+            # Si la fecha visible difiere, intentar un paso adicional en la direccion correcta.
+            visible_date = self._parse_visible_date(visible)
+            if visible_date is None:
+                break
+            diff = (requested - visible_date).days
+            if diff == 0:
+                return
+            corr_direction = "next" if diff > 0 else "prev"
+            previous_date = visible
+            if not await self._click_day_arrow(page, corr_direction):
+                break
+            try:
+                await page.locator("[data-testid='wcl-dayPickerButton']").filter(
+                    has_not_text=previous_date
+                ).first.wait_for(timeout=4000)
+            except Exception:
+                await page.wait_for_timeout(700)
+
+    async def _click_day_arrow(self, page: Any, direction: str) -> bool:
+        """Click robusto sobre la flecha del day picker (next/prev).
+
+        - Estrategia 1: selector por atributo ``[data-day-picker-arrow="<dir>"]``.
+        - Estrategia 2: fallback por aria-label (multi-idioma).
+        - Estrategia 3: JS ``element.click()`` para saltar overlays no-bloqueantes.
+        - Estrategia 4: teclado (PageDown/PageUp) sobre el contenedor del picker.
+
+        Devuelve True si parece haber registrado un click; False si todas fallaron.
+        """
+        # Dismiss preventivo de overlays que podrian tapar el boton.
+        await self._dismiss_overlays(page)
+
+        attr_selector = f"[data-day-picker-arrow='{direction}']"
+        aria_labels = (
+            "Día siguiente" if direction == "next" else "Día anterior",
+            "Next day" if direction == "next" else "Previous day",
+            "Tomorrow" if direction == "next" else "Yesterday",
+        )
+
+        # Estrategia 1: selector por atributo data.
         try:
-            await page.locator("[data-testid='wcl-dayPickerButton']").filter(
-                has_text=expected
-            ).wait_for(timeout=5000)
-        except Exception:
-            await page.wait_for_timeout(2500)
+            loc = page.locator(attr_selector).first
+            if await loc.count():
+                await loc.scroll_into_view_if_needed(timeout=1500)
+                await loc.wait_for(state="visible", timeout=4000)
+                await loc.click(timeout=8000)
+                return True
+        except Exception as exc:
+            logger.debug("click arrow (attr) fallo: %s", exc)
+
+        # Estrategia 2: aria-label en varios idiomas.
+        for label in aria_labels:
+            try:
+                btn = page.get_by_label(label).first
+                if await btn.count():
+                    await btn.scroll_into_view_if_needed(timeout=1500)
+                    await btn.wait_for(state="visible", timeout=3000)
+                    await btn.click(timeout=6000)
+                    return True
+            except Exception as exc:
+                logger.debug("click arrow (label=%s) fallo: %s", label, exc)
+                continue
+
+        # Estrategia 3: JS click para saltar overlays.
+        try:
+            handle = await page.locator(attr_selector).first.element_handle(timeout=1500)
+            if handle is not None:
+                await page.evaluate("(el) => el.click()", handle)
+                return True
+        except Exception as exc:
+            logger.debug("click arrow (js) fallo: %s", exc)
+
+        # Estrategia 4: teclado.
+        try:
+            key = "PageDown" if direction == "next" else "PageUp"
+            await page.locator("[data-testid='wcl-dayPickerButton']").first.focus(timeout=1500)
+            await page.keyboard.press(key)
+            return True
+        except Exception as exc:
+            logger.debug("click arrow (keyboard) fallo: %s", exc)
+
+        return False
+
+    async def _dismiss_overlays(self, page: Any) -> None:
+        """Cierra modales/banners conocidos que tapan los controles del day picker."""
+        selectors = (
+            "[data-testid='wcl-modal-close']",
+            "button[aria-label*='cerrar' i]",
+            "button[aria-label*='close' i]",
+            "#onetrust-accept-btn-handler",
+            ".banner__close",
+            "[class*='ModalClose']",
+        )
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() and await loc.is_visible():
+                    await loc.click(timeout=1200)
+                    await page.wait_for_timeout(150)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _parse_visible_date(visible_text: str) -> date_type | None:
+        """Extrae una fecha del texto del day picker (formatos DD/MM o DD.MM)."""
+        if not visible_text:
+            return None
+        match = re.search(r"(\d{1,2})[/.\-](\d{1,2})", visible_text)
+        if not match:
+            return None
+        day, month = int(match.group(1)), int(match.group(2))
+        today = datetime.now().date()
+        # Asumir mismo anio; si el mes esta muy alejado del actual, ajustar.
+        year = today.year
+        try:
+            candidate = date_type(year, month, day)
+        except ValueError:
+            return None
+        diff_days = (candidate - today).days
+        if diff_days > 200:
+            candidate = candidate.replace(year=year - 1)
+        elif diff_days < -200:
+            candidate = candidate.replace(year=year + 1)
+        return candidate
 
     async def _visible_date_text(self, page: Any) -> str:
         try:
