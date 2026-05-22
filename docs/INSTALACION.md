@@ -1,105 +1,115 @@
 # Tutorial de instalación — Flashscore MCP **Fast** (Cloud)
 
-Este MCP corre 100% en la nube (Hugging Face Spaces). **No se instala nada localmente** — los clientes (VS Code, Claude, Codex, ChatGPT) sólo necesitan la URL HTTPS y un token Bearer.
+Versión optimizada del MCP que reutiliza **el mismo Space que ya tenías** (`angelvis/flashscore-mcp`), sólo que ahora con el código rápido del branch `cloud-fast`. **No hay que crear Space nuevo.**
 
 - **Repo GitHub**: <https://github.com/angelvis89/flashscore-mcp>
-- **Branch productiva**: `cloud-fast`
-- **Space HF (objetivo)**: `angelvis-flashscore-mcp-fast` → `https://angelvis-flashscore-mcp-fast.hf.space/mcp`
+- **Branch productivo**: `cloud-fast`
+- **Space HF (reutilizado)**: `angelvis/flashscore-mcp` → `https://angelvis-flashscore-mcp.hf.space/mcp`
 - **Caché L3 (CDN)**: GitHub Pages del branch `data`
+
+### Qué cambió respecto al cloud viejo
+
+| | Cloud viejo | **Cloud Fast (este)** |
+|---|---|---|
+| BrowserPool reusable | ❌ Lanzaba Chromium en cada request | ✅ Singleton, warm-up al arranque |
+| 6 secciones del detalle | Secuencial (~90 s) | **Paralelo `asyncio.gather` (~15 s)** |
+| `fetch_match_detail` | Iteraba 7 días pasados | **URL canónica directa** |
+| `storage_state` (cookies) | Aceptaba cookies en cada request | **Persistido, salta el banner** |
+| Caché L3 | No existía | **JSON precacheado en GitHub Pages, ~300 ms** |
+| `wait_for_timeout` fijos | 2200 ms x 6 | Espera por selector real |
+
+**Resultado**: consultas que tardaban **~60 s** ahora tardan **~5–15 s** en caliente y **~300 ms** si están en caché L3.
 
 ---
 
-## Parte A — Despliegue en la nube (una sola vez)
+## Parte A — Migrar el Space existente (una sola vez)
 
-### A1. Crear el Space en Hugging Face
+### A1. Generar token de autenticación del MCP
 
-1. Entra a <https://huggingface.co/new-space>.
-2. Owner: `angelvis` · Space name: `flashscore-mcp-fast`.
-3. License: MIT · **SDK: Docker** · Hardware: **CPU basic (free)**.
-4. Visibility: **Public** (necesario para que VS Code/Claude lo consuman sin login HF).
-5. Click **Create Space**. Queda vacío esperando el primer push del workflow.
-
-### A2. Generar token de autenticación del MCP
-
-En PowerShell (sólo lo usas una vez, luego se guarda en secretos):
+En PowerShell:
 
 ```powershell
 [Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
-Copia el resultado. Llámalo `MCP_AUTH_TOKEN`.
+Copia el resultado. Llámalo `MCP_AUTH_TOKEN`. (Si quieres reutilizar el bearer del cloud viejo `+Dqwt4bWWlr6sFl0kyX266VE3/zwlJhYDtnmGQtFgXU=`, también vale — pero recomiendo rotarlo.)
 
-### A3. Crear un HF Access Token
+### A2. Verificar GitHub Secrets
 
-1. <https://huggingface.co/settings/tokens> → **New token** → role `Write`.
-2. Copia el token (`hf_...`). Llámalo `HF_TOKEN`.
-
-### A4. Configurar GitHub Secrets
-
-En el repo: **Settings → Secrets and variables → Actions → New repository secret**.
+En el repo: **Settings → Secrets and variables → Actions**. Necesitas estos tres (probablemente ya tienes los dos primeros del despliegue anterior):
 
 | Nombre | Valor |
 |---|---|
-| `HF_TOKEN` | `hf_...` (del paso A3) |
-| `HF_SPACE_REPO_FAST` | `angelvis/flashscore-mcp-fast` |
-| `MCP_AUTH_TOKEN` | base64 del paso A2 |
+| `HF_TOKEN` | Tu token HF con scope `Write` (<https://huggingface.co/settings/tokens>) |
+| `HF_SPACE_REPO` | `angelvis/flashscore-mcp` (el Space existente) |
+| `MCP_AUTH_TOKEN` | El bearer del paso A1 |
 
-### A5. Habilitar GitHub Pages (CDN del caché L3)
+> Si tu secret se llama `HF_SPACE_REPO_FAST`, renómbralo a `HF_SPACE_REPO` o crea uno nuevo con ese nombre.
+
+### A3. Configurar variables en el Space HF
+
+Ve a <https://huggingface.co/spaces/angelvis/flashscore-mcp/settings> → **Variables and secrets**:
+
+| Nombre | Tipo | Valor |
+|---|---|---|
+| `MCP_AUTH_TOKEN` | **Secret** | El mismo bearer del paso A1 |
+| `FLASHSCORE_STATIC_CACHE_URL` | Variable | `https://angelvis89.github.io/flashscore-mcp` |
+
+### A4. Habilitar GitHub Pages (CDN del caché L3)
 
 1. Repo → **Settings → Pages**.
 2. Source: **Deploy from a branch**.
 3. Branch: `data` · folder: `/ (root)` → **Save**.
 
-> El branch `data` lo crea automáticamente el workflow `precache.yml` en su primera ejecución.
+> El branch `data` lo crea automáticamente el workflow `precache.yml` en su primera corrida.
 
-### A6. Disparar el primer deploy
+### A5. Disparar el primer deploy FAST
 
-1. Repo → **Actions → Deploy HF Space (fast)** → **Run workflow** → branch `cloud-fast` → **Run**.
-2. Espera ~3-5 min. Verifica el Space en `https://huggingface.co/spaces/angelvis/flashscore-mcp-fast` (debe quedar en **Running**).
-3. Smoke test desde PowerShell:
+1. Repo → **Actions → deploy-hfspace-fast** → **Run workflow** → branch `cloud-fast` → **Run**.
+2. Espera ~3–5 min. El Space `angelvis/flashscore-mcp` se reconstruye con el código nuevo.
+3. Verifica en <https://huggingface.co/spaces/angelvis/flashscore-mcp> que quede en estado **Running**.
+4. Smoke test:
 
 ```powershell
 $tok = "PEGA_AQUI_TU_MCP_AUTH_TOKEN"
-Invoke-RestMethod -Uri "https://angelvis-flashscore-mcp-fast.hf.space/health" -Headers @{ Authorization = "Bearer $tok" }
+Invoke-RestMethod -Uri "https://angelvis-flashscore-mcp.hf.space/health" -Headers @{ Authorization = "Bearer $tok" }
 ```
 
-Debe responder `{"status":"ok"}`.
+Debe devolver `{"status":"ok"}`.
 
-### A7. Activar el precache (opcional pero recomendado)
+### A6. Activar el precache (recomendado)
 
 1. Repo → **Actions → Precache flashscore** → **Run workflow** → branch `cloud-fast`.
-2. La primera vez genera `data/live.json`, `data/by_date/*.json`, `data/detail/*.json` en el branch `data`.
-3. A partir de ahí corre automático cada 5 min en la ventana **12:00–04:00 UTC** (hora de partidos en Europa/Sudamérica).
+2. Genera `data/live.json`, `data/by_date/*.json`, `data/detail/*.json` en el branch `data`.
+3. A partir de ahí corre automático cada 5 min en la ventana **12:00–04:00 UTC**.
 
 ---
 
 ## Parte B — Conectar desde VS Code (ya quedó listo)
 
-Ya configuré tu `mcp.json` en este workspace. Sólo te falta:
+Tu `mcp.json` ya tiene los dos servidores activos: `flashscore` (local) + `flashscore-fast` (HTTP cloud).
 
-1. Recargar VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**.
-2. Abrir el chat → el primer uso de una herramienta `flashscore-fast` te pedirá el token. Pega el `MCP_AUTH_TOKEN` del paso A2. VS Code lo guarda en su keychain.
-3. Verifica con: *"con flashscore-fast, dame los partidos de hoy"*.
+1. Recarga VS Code: `Ctrl+Shift+P` → **Developer: Reload Window**.
+2. El primer uso de `flashscore-fast` te pedirá el token → pega el `MCP_AUTH_TOKEN`. VS Code lo guarda en su keychain.
+3. Verifica con: *"usa flashscore-fast para darme los partidos de hoy"*.
 
-### MCPs antiguos (desactivados, no eliminados)
+### Cuándo usar cada uno
 
-Hice backup automático:
-
-- `.vscode\mcp.json.bak-pre-fast-20260522-150751` (workspace)
-- `%APPDATA%\Code\User\mcp.json.bak-pre-fast-20260522-150751` (global)
-
-Si en algún momento quieres reactivar el `flashscore` local o el `flashscore-cloud` viejo, copia el bloque correspondiente del backup al `mcp.json` activo.
+| MCP | Cuándo |
+|---|---|
+| `flashscore-fast` | **Por defecto.** Es el rápido, corre en la nube, soporta paralelización y caché L3. |
+| `flashscore` (local) | Sólo si la nube está caída o necesitas debuggear cambios sin desplegar. |
 
 ---
 
 ## Parte C — Conectar desde Codex CLI
 
-Edita `~/.codex/config.toml` y añade:
+Edita `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.flashscore-fast]
 type = "http"
-url = "https://angelvis-flashscore-mcp-fast.hf.space/mcp"
+url = "https://angelvis-flashscore-mcp.hf.space/mcp"
 
 [mcp_servers.flashscore-fast.headers]
 Authorization = "Bearer TU_MCP_AUTH_TOKEN"
@@ -111,7 +121,7 @@ Reinicia Codex. Verifica con `codex mcp list`.
 
 ## Parte D — Conectar desde Claude Desktop
 
-Claude Desktop **no soporta HTTP nativo todavía** — necesita el puente `mcp-remote`.
+Claude Desktop **no soporta HTTP nativo** todavía — necesita el puente `mcp-remote`.
 
 1. Instala una vez: `npm install -g mcp-remote`
 2. Edita `%APPDATA%\Claude\claude_desktop_config.json`:
@@ -124,7 +134,7 @@ Claude Desktop **no soporta HTTP nativo todavía** — necesita el puente `mcp-r
       "args": [
         "-y",
         "mcp-remote",
-        "https://angelvis-flashscore-mcp-fast.hf.space/mcp",
+        "https://angelvis-flashscore-mcp.hf.space/mcp",
         "--header",
         "Authorization: Bearer TU_MCP_AUTH_TOKEN"
       ]
@@ -133,8 +143,8 @@ Claude Desktop **no soporta HTTP nativo todavía** — necesita el puente `mcp-r
 }
 ```
 
-3. Reinicia Claude Desktop (cerrar desde la bandeja, no sólo la ventana).
-4. En el chat, el icono de herramientas (🔌) debe mostrar `flashscore-fast`.
+3. Reinicia Claude Desktop (ciérralo desde la bandeja, no sólo la ventana).
+4. En el chat, el icono 🔌 debe mostrar `flashscore-fast`.
 
 ---
 
@@ -143,9 +153,9 @@ Claude Desktop **no soporta HTTP nativo todavía** — necesita el puente `mcp-r
 ChatGPT aún no consume MCP directo — se conecta vía **Actions** con OpenAPI.
 
 1. Abre <https://chat.openai.com/gpts/editor>.
-2. Configure → **Create new action**.
+2. **Configure → Create new action**.
 3. **Authentication**: API Key · Auth Type **Bearer** · pega `MCP_AUTH_TOKEN`.
-4. En **Schema** pega el spec OpenAPI mínimo:
+4. En **Schema** pega:
 
 ```yaml
 openapi: 3.1.0
@@ -153,7 +163,7 @@ info:
   title: Flashscore MCP Fast
   version: "1.0"
 servers:
-  - url: https://angelvis-flashscore-mcp-fast.hf.space
+  - url: https://angelvis-flashscore-mcp.hf.space
 paths:
   /tools/get_live_scores:
     post:
@@ -189,20 +199,20 @@ paths:
         "200": { description: OK }
 ```
 
-5. **Privacy policy**: pon la URL del repo (`https://github.com/angelvis89/flashscore-mcp`).
-6. Guarda. Prueba el GPT con *"dame los partidos del día"*.
+5. **Privacy policy**: `https://github.com/angelvis89/flashscore-mcp`.
+6. Guarda. Prueba con *"dame los partidos del día"*.
 
 ---
 
 ## Parte F — Otros clientes (Cursor, Continue.dev, Cline, Zed…)
 
-Todos los clientes MCP modernos aceptan transporte `http` con bearer. Patrón genérico:
+Patrón genérico HTTP+bearer:
 
 ```json
 {
   "name": "flashscore-fast",
   "transport": "http",
-  "url": "https://angelvis-flashscore-mcp-fast.hf.space/mcp",
+  "url": "https://angelvis-flashscore-mcp.hf.space/mcp",
   "headers": { "Authorization": "Bearer TU_MCP_AUTH_TOKEN" }
 }
 ```
@@ -230,25 +240,25 @@ Todos los clientes MCP modernos aceptan transporte `http` con bearer. Patrón ge
 
 ## Parte H — Mantenimiento y troubleshooting
 
-| Síntoma | Causa probable | Fix |
+| Síntoma | Causa | Fix |
 |---|---|---|
-| Space en estado `Build error` | Falta secret `HF_TOKEN` o nombre Space mal | Revisar paso A4 |
+| Space en `Build error` | Falta secret `HF_TOKEN` o nombre Space mal | Revisar A2 |
 | `401 Unauthorized` | Token mal pegado | Verificar bearer en el cliente |
-| `503 Service Unavailable` | Space dormido (free tier) | Primer request lo despierta (15-30 s) |
+| `503 Service Unavailable` | Space dormido | Primer request lo despierta (15–30 s) |
 | Respuestas viejas | Caché L3 sin refrescar | Disparar `Precache flashscore` manual |
-| Workflow `precache` excede 2000 min/mes | Ventana muy amplia | Editar cron en `.github/workflows/precache.yml` |
+| Workflow excede 2000 min/mes | Ventana muy amplia | Editar cron en `.github/workflows/precache.yml` |
 
 ### Logs
 
-- **Space**: <https://huggingface.co/spaces/angelvis/flashscore-mcp-fast> → tab **Logs**.
+- **Space**: <https://huggingface.co/spaces/angelvis/flashscore-mcp> → tab **Logs**.
 - **Actions**: <https://github.com/angelvis89/flashscore-mcp/actions>.
-- **Cliente VS Code**: `Output` → canal **MCP**.
+- **VS Code**: `Output` → canal **MCP**.
 
 ### Rotar el token
 
-1. Generar nuevo con el comando del paso A2.
-2. Actualizar secret `MCP_AUTH_TOKEN` en GitHub.
-3. Re-run del workflow `Deploy HF Space (fast)`.
+1. Generar nuevo (paso A1).
+2. Actualizar secret `MCP_AUTH_TOKEN` en GitHub + variable `MCP_AUTH_TOKEN` en el Space.
+3. Re-run del workflow `deploy-hfspace-fast`.
 4. Actualizar el bearer en cada cliente.
 
 ---
@@ -264,9 +274,10 @@ Todos los clientes MCP modernos aceptan transporte `http` con bearer. Patrón ge
                                       │                  │
                                       ▼                  ▼
                               ┌──────────────┐   ┌────────────────┐
-                              │ HF Space FAST│   │ Branch `data`  │
-                              │ FastMCP HTTP │◀──│ GitHub Pages CDN│
-                              └──────┬───────┘   └────────────────┘
+                              │ HF Space     │   │ Branch `data`  │
+                              │ (reutilizado)│◀──│ GitHub Pages CDN│
+                              │ FastMCP HTTP │   └────────────────┘
+                              └──────┬───────┘
                                      │
                                      ▼
               ┌──────────────────────────────────────────┐
@@ -274,6 +285,6 @@ Todos los clientes MCP modernos aceptan transporte `http` con bearer. Patrón ge
               └──────────────────────────────────────────┘
 ```
 
-- **Hot path** (live): Cliente → Space → Playwright → respuesta (~5-15 s)
-- **Warm path** (cacheado): Cliente → Space → consulta CDN Pages → respuesta (~300 ms)
-- **Cold path** (no cacheado): Cliente → Space → Playwright (~15-25 s)
+- **Hot path** (live, sin caché): ~5–15 s
+- **Warm path** (cacheado en CDN Pages): ~300 ms
+- **Cold path** (Space dormido despertando): ~15–25 s

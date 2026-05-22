@@ -1,11 +1,11 @@
 name: deploy-hfspace-fast
 
-# Despliega la version FAST del MCP a un HF Space paralelo, sin afectar el
-# Space actual. Permite A/B real con clientes.
+# Despliega la version FAST del MCP REUTILIZANDO el Space existente
+# (angelvis/flashscore-mcp). Sobrescribe el codigo viejo con el optimizado.
 #
 # Requiere secrets:
-#   HF_TOKEN            - token HF con scope write
-#   HF_SPACE_REPO_FAST  - slug del Space fast, ej: "angelvis89/flashscore-mcp-fast"
+#   HF_TOKEN        - token HF con scope write
+#   HF_SPACE_REPO   - slug del Space, ej: "angelvis/flashscore-mcp"
 #
 # Variables del Space (configurar en HF UI Settings -> Variables):
 #   MCP_AUTH_TOKEN              (secret) - Bearer para autenticar al MCP
@@ -48,7 +48,7 @@ jobs:
       - name: Subir al Hugging Face Space FAST
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO_FAST }}
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
           python <<'PY'
           import os
