@@ -36,7 +36,7 @@ COPY README.md ./
 
 RUN pip install --upgrade pip setuptools wheel && \
     pip install . && \
-    pip install httpx && \
+    pip install httpx tzdata && \
     chown -R mcpuser:mcpuser /app
 
 USER mcpuser
