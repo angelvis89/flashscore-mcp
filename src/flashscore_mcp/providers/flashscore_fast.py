@@ -447,7 +447,7 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
             "double_chance": "doble-oportunidad/partido/",
             "draw_no_bet": "draw-no-bet/partido/",
         }
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(5)
 
         async def _one_market(name: str, path: str) -> tuple[str, dict[str, Any], str]:
             url = f"{base_url}cuotas/{path}?mid={mid}"
