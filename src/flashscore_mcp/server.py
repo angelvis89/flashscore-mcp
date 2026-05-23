@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -222,7 +223,36 @@ async def get_match_full_detail(
         detail: MatchDetail = entry.value
         return detail.to_dict()
 
-    detail = await provider.fetch_match_full_detail(match_id=match_id, sections=requested)
+    # Timeout global: GARANTIZA que nunca tardamos mas que el cliente
+    # (default cliente warm=45s, cold=90s). Si excedemos, devolvemos cache
+    # stale (si existe) o un error explicito para que el cliente no se
+    # bloquee. Configurable via FLASHSCORE_FULL_DETAIL_TIMEOUT_S (default 24s).
+    full_timeout = float(os.getenv("FLASHSCORE_FULL_DETAIL_TIMEOUT_S", "24"))
+    try:
+        detail = await asyncio.wait_for(
+            provider.fetch_match_full_detail(match_id=match_id, sections=requested),
+            timeout=full_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "get_match_full_detail timeout global %.1fs para %s, fallback a cache stale",
+            full_timeout, match_id,
+        )
+        if entry is not None:
+            stale_detail: MatchDetail = entry.value
+            payload = stale_detail.to_dict()
+            payload["warnings"] = (payload.get("warnings") or []) + [
+                f"Timeout global {full_timeout:.0f}s: sirviendo cache stale",
+            ]
+            return payload
+        return {
+            "source": provider.source_name,
+            "fetched_at": utc_now_iso(),
+            "item": None,
+            "warnings": [
+                f"Timeout global {full_timeout:.0f}s y sin cache previo.",
+            ],
+        }
     if detail is None:
         return {
             "source": provider.source_name,

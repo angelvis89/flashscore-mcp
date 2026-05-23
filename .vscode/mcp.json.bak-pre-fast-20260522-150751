@@ -1,0 +1,21 @@
+﻿{
+    "servers":  {
+                    "flashscore":  {
+                                       "type":  "stdio",
+                                       "command":  "C:\\Users\\User\\Desktop\\Crear MCP\\.venv\\Scripts\\python.exe",
+                                       "args":  [
+                                                    "-m",
+                                                    "flashscore_mcp.server"
+                                                ],
+                                       "cwd":  "C:\\Users\\User\\Desktop\\Crear MCP",
+                                       "env":  {
+                                                   "MCP_TRANSPORT":  "stdio",
+                                                   "SPORTS_PROVIDER":  "flashscore",
+                                                   "FLASHSCORE_TIMEOUT_MS":  "16000"
+                                               }
+                                   }
+                },
+    "inputs":  [
+
+               ]
+}

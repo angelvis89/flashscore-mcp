@@ -1,21 +1,19 @@
-﻿{
-    "servers":  {
-                    "flashscore":  {
-                                       "type":  "stdio",
-                                       "command":  "C:\\Users\\User\\Desktop\\Crear MCP\\.venv\\Scripts\\python.exe",
-                                       "args":  [
-                                                    "-m",
-                                                    "flashscore_mcp.server"
-                                                ],
-                                       "cwd":  "C:\\Users\\User\\Desktop\\Crear MCP",
-                                       "env":  {
-                                                   "MCP_TRANSPORT":  "stdio",
-                                                   "SPORTS_PROVIDER":  "flashscore",
-                                                   "FLASHSCORE_TIMEOUT_MS":  "16000"
-                                               }
-                                   }
-                },
-    "inputs":  [
-
-               ]
+{
+  "inputs": [
+    {
+      "id": "flashscore_fast_token",
+      "type": "promptString",
+      "description": "Bearer token del Space FAST (MCP_AUTH_TOKEN)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "flashscore-fast": {
+      "type": "http",
+      "url": "https://angelvis-flashscore-mcp.hf.space/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:flashscore_fast_token}"
+      }
+    }
+  }
 }

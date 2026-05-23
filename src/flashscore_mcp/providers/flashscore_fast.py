@@ -287,6 +287,14 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
         async def _run_section(name: str) -> tuple[str, MatchSection]:
             async with sem:
                 async def _do() -> MatchSection:
+                    # Caso especial odds: el override _extract_all_odds_markets
+                    # abre sus propias 5 pages del pool en paralelo, no necesita
+                    # la page del envoltorio. Mantenerla tomada aqui causaba
+                    # deadlock (1 base + 3 odds concurrentes > pool capacity).
+                    if name == "odds":
+                        return await self._extract_all_odds_markets(
+                            None, base_url=base_url, mid=mid  # type: ignore[arg-type]
+                        )
                     async with self._pool.page() as (_ctx, page):
                         # NO hacemos page.goto/accept_cookies aqui: el metodo
                         # _extract_detail_section ya hace su propio goto al
