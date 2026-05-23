@@ -405,6 +405,82 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
                 )
             return rows
 
+    async def _extract_all_odds_markets(
+        self,
+        page: Any,
+        *,
+        base_url: str,
+        mid: str,
+    ) -> MatchSection:
+        """Override fast: paralelizar mercados + 5 esenciales en vez de 10.
+
+        Causa raiz identificada: el metodo baseline hace 10 page.goto SECUENCIALES
+        con wait_for_timeout(1800) por mercado => 18s puro sleep + 10x navegacion
+        = 25-40s solo para la seccion odds. Esto era el cuello real del
+        full_detail >50s en partidos exoticos.
+
+        Optimizaciones:
+        - Mercados: 10 -> 5 esenciales (1x2, over_under, both_teams_to_score,
+          double_chance, draw_no_bet). Los otros 5 (correct_score, ht/ft,
+          odd/even, asian_handicap, to_qualify) tienen baja demanda y datos
+          inestables; se omiten para no penalizar el caso comun.
+        - Paralelizacion: asyncio.gather con sem=3 abriendo pages independientes
+          del pool. Tiempo total ~= max(navegaciones) en vez de suma.
+        - wait_for_timeout: 1800ms -> 500ms.
+        - Timeout duro por mercado: 8s. Si uno se cuelga, devuelve no-available
+          pero no bloquea los otros.
+        - El page recibido como parametro NO se usa aqui (cada mercado abre el
+          suyo desde el pool).
+        """
+        markets = {
+            "1x2": "cuotas-1x2/partido/",
+            "over_under": "mas-de-menos-de/partido/",
+            "both_teams_to_score": "ambos-equipos-marcaran/partido/",
+            "double_chance": "doble-oportunidad/partido/",
+            "draw_no_bet": "draw-no-bet/partido/",
+        }
+        sem = asyncio.Semaphore(3)
+
+        async def _one_market(name: str, path: str) -> tuple[str, dict[str, Any], str]:
+            url = f"{base_url}cuotas/{path}?mid={mid}"
+            async def _do() -> tuple[dict[str, Any], str]:
+                async with self._pool.page() as (_ctx, m_page):
+                    await m_page.goto(
+                        url,
+                        wait_until="domcontentloaded",
+                        timeout=self.settings.timeout_ms,
+                    )
+                    await m_page.wait_for_timeout(500)
+                    text = (await m_page.locator("body").inner_text(timeout=4000)).strip()
+                    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                    parsed = self._parse_odds_market(name, lines)
+                    return parsed, "\n".join(lines[:120])
+            async with sem:
+                try:
+                    parsed, raw = await asyncio.wait_for(_do(), timeout=8.0)
+                    return name, parsed, f"## {name}\n{raw}"
+                except Exception as exc:
+                    logger.warning("Odds market %s fallo: %s", name, exc)
+                    return name, {"available": False, "error": str(exc)}, ""
+
+        results = await asyncio.gather(
+            *[_one_market(name, path) for name, path in markets.items()],
+            return_exceptions=False,
+        )
+        data: dict[str, Any] = {"markets": {}, "best_recommendations": []}
+        raw_parts: list[str] = []
+        for name, parsed, raw in results:
+            data["markets"][name] = parsed
+            if raw:
+                raw_parts.append(raw)
+        data["best_recommendations"] = self._build_betting_recommendations(data["markets"])
+        return MatchSection(
+            name="odds",
+            available=any(m.get("available") for m in data["markets"].values()),
+            raw_text="\n\n".join(raw_parts),
+            data=data,
+        )
+
     async def warmup(self) -> None:
         """Pre-calienta el browser + acepta cookies + guarda storage_state.
 
