@@ -215,8 +215,14 @@ async def get_match_full_detail(
     sections: list[str] | None = None,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
-    """Obtiene resumen, estadisticas, alineaciones, cuotas, H2H y previa del partido."""
-    requested = sections or ["summary", "statistics", "lineups", "odds", "h2h", "preview"]
+    """Obtiene resumen, estadisticas, alineaciones, H2H y previa del partido.
+
+    Nota: en HF Space free tier (2 vCPU) las cuotas (`odds`) NO se incluyen por
+    defecto porque su scrapeo paraleliza 3 mercados y satura CPU al combinarse
+    con las otras 4 secciones. Para cuotas usar `get_match_odds` que las pide
+    aparte (un solo request HTTP, ~10s) y se cachea independientemente.
+    """
+    requested = sections or ["summary", "statistics", "lineups", "h2h", "preview"]
     key = f"full:{match_id}:{','.join(sorted(requested))}"
     entry = await cache.get(key)
     if entry and not force_refresh and not entry.is_stale:
