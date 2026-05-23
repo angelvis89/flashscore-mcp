@@ -658,7 +658,7 @@ class FlashscorePlaywrightProvider:
                     timeout=self.settings.timeout_ms,
                 )
 
-            await page.wait_for_timeout(2200)
+            await page.wait_for_timeout(900)
             raw_text = (await page.locator("body").inner_text(timeout=4000)).strip()
             useful = self._slice_section_text(raw_text)
             data = await self._extract_structured_section(page, section)

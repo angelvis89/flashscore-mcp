@@ -288,8 +288,12 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
             async with sem:
                 async def _do() -> MatchSection:
                     async with self._pool.page() as (_ctx, page):
-                        await page.goto(base_url, wait_until="domcontentloaded")
-                        await self._try_accept_cookies_fast(page)
+                        # NO hacemos page.goto/accept_cookies aqui: el metodo
+                        # _extract_detail_section ya hace su propio goto al
+                        # subpath especifico de la seccion (h2h/, summary,
+                        # lineups, etc.). Hacerlo dos veces duplicaba 3-5s
+                        # de network por seccion (era la causa real del
+                        # full_detail >50s en partidos exoticos).
                         return await self._extract_detail_section(
                             page, section=name, base_url=base_url, mid=mid
                         )
