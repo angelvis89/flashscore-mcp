@@ -37,8 +37,10 @@ class Settings:
     ttl_finished_seconds: int = 86_400
     max_watch_seconds: int = 120
     transport: str = "stdio"
-    # Limites internos de concurrencia y rate-limit al scrapear Flashscore
-    max_concurrent_pages: int = 3
+    # Limites internos de concurrencia y rate-limit al scrapear Flashscore.
+    # Valor bajo (3-4) protege la RAM del HF Space free; subir solo si se tiene
+    # un Space mas grande o se corre el container con >=4GB.
+    max_concurrent_pages: int = 4
     min_request_delay_ms: int = 0
     # Endurecimiento HTTP (solo activos cuando transport=streamable-http)
     auth_token: str | None = None
@@ -47,8 +49,10 @@ class Settings:
     bind_port: int = 8000
     # ---- Modo FAST (FlashscoreFastProvider) ----
     # Numero de paginas paralelas para extraer secciones de fetch_match_full_detail.
-    # 6 = una pagina por seccion (max velocidad, ~600MB RAM).
-    fast_parallel_sections: int = 6
+    # 2 = compromiso estable: secciones procesadas en 3 tandas, ~12-18s/partido,
+    # ~300MB RAM. Subir a 4-6 solo si el host tiene >=4GB y baja concurrencia
+    # de clientes externos.
+    fast_parallel_sections: int = 2
     # Path local donde se persiste el storage_state (cookies aceptadas) entre runs.
     storage_state_path: str = "/tmp/flashscore_state.json"
     # Si True, el server hace warmup del browser + cookies al startup (lifespan).

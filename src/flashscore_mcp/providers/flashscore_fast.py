@@ -270,21 +270,40 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
         mid = self._match_mid(detail_url, match_id)
         requested = sections or ["summary", "statistics", "lineups", "odds", "h2h", "preview"]
 
-        # Limitar paralelismo segun config (default 6 = una pagina por seccion)
+        # Limitar paralelismo segun config. Default conservador (2) para evitar
+        # saturar el BrowserPool cuando varios clientes piden detalle a la vez.
+        # Si fast_parallel_sections=6 + clientes en paralelo => >20 paginas
+        # simultaneas => Chromium se asfixia en HF Space free.
         sem = asyncio.Semaphore(
             min(self.settings.fast_parallel_sections, max(1, len(requested)))
         )
+        # Timeout global por seccion: si Playwright se cuelga (cookies bloqueantes,
+        # JS infinito, recurso lento), abortamos y devolvemos seccion vacia con
+        # warning en vez de bloquear todo el detalle del partido.
+        section_timeout = max(20.0, self.settings.timeout_ms / 1000.0 * 1.5)
 
         async def _run_section(name: str) -> tuple[str, MatchSection]:
             async with sem:
-                try:
+                async def _do() -> MatchSection:
                     async with self._pool.page() as (_ctx, page):
                         await page.goto(base_url, wait_until="domcontentloaded")
                         await self._try_accept_cookies_fast(page)
-                        section = await self._extract_detail_section(
+                        return await self._extract_detail_section(
                             page, section=name, base_url=base_url, mid=mid
                         )
-                        return name, section
+                try:
+                    section = await asyncio.wait_for(_do(), timeout=section_timeout)
+                    return name, section
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Seccion %s del partido %s excedio timeout %.1fs",
+                        name, mid, section_timeout,
+                    )
+                    return name, MatchSection(
+                        name=name,
+                        available=False,
+                        warnings=[f"Timeout {section_timeout:.0f}s"],
+                    )
                 except Exception as exc:
                     return name, MatchSection(
                         name=name,
