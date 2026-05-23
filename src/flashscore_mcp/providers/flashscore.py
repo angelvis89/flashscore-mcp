@@ -5,8 +5,17 @@ import re
 from datetime import date as date_type
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from flashscore_mcp.config import Settings
+
+# El navegador navega Flashscore.pe con timezone America/Lima. Para que el
+# day picker avance la cantidad correcta de pasos hay que medir el delta
+# respecto a "hoy en Lima", NO respecto a "hoy en UTC" del contenedor.
+# Sin esto, cuando UTC ya saltó al día siguiente pero Lima sigue en el día
+# anterior, delta=0 y el scraper devuelve la página del día previo etiquetada
+# como la fecha pedida (todos los partidos aparecen Finalizado).
+_LIMA_TZ = ZoneInfo("America/Lima")
 from flashscore_mcp.models import LiveMatch, MatchDetail, MatchScore, MatchSection, utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -329,7 +338,9 @@ class FlashscorePlaywrightProvider:
         except ValueError:
             return
 
-        today = datetime.now().date()
+        # FIX TZ: el browser navega con TZ Lima. today debe medirse en Lima
+        # para que delta refleje los clicks reales del day picker (ver módulo).
+        today = datetime.now(_LIMA_TZ).date()
         delta = (requested - today).days
         if delta == 0:
             return
@@ -480,7 +491,9 @@ class FlashscorePlaywrightProvider:
         if not match:
             return None
         day, month = int(match.group(1)), int(match.group(2))
-        today = datetime.now().date()
+        # TZ Lima: el picker visible refleja la fecha del navegador (Lima),
+        # no del contenedor UTC.
+        today = datetime.now(_LIMA_TZ).date()
         # Asumir mismo anio; si el mes esta muy alejado del actual, ajustar.
         year = today.year
         try:
