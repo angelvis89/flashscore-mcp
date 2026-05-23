@@ -440,14 +440,14 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
         - El page recibido como parametro NO se usa aqui (cada mercado abre el
           suyo desde el pool).
         """
+        # Free tier HF Space (2 vCPU): 3 mercados esenciales para no saturar CPU.
+        # 1x2, over/under y both-teams cubren ~95% del uso real de apuestas.
         markets = {
             "1x2": "cuotas-1x2/partido/",
             "over_under": "mas-de-menos-de/partido/",
             "both_teams_to_score": "ambos-equipos-marcaran/partido/",
-            "double_chance": "doble-oportunidad/partido/",
-            "draw_no_bet": "draw-no-bet/partido/",
         }
-        sem = asyncio.Semaphore(5)
+        sem = asyncio.Semaphore(3)
 
         async def _one_market(name: str, path: str) -> tuple[str, dict[str, Any], str]:
             url = f"{base_url}cuotas/{path}?mid={mid}"
