@@ -279,8 +279,10 @@ class FlashscoreFastProvider(FlashscorePlaywrightProvider):
         )
         # Timeout global por seccion: si Playwright se cuelga (cookies bloqueantes,
         # JS infinito, recurso lento), abortamos y devolvemos seccion vacia con
-        # warning en vez de bloquear todo el detalle del partido.
-        section_timeout = max(20.0, self.settings.timeout_ms / 1000.0 * 1.5)
+        # warning en vez de bloquear todo el detalle del partido. Se calibra a
+        # ~60% del timeout global => con timeout_ms=25s da 15s, asi un partido
+        # completo (3 ondas x 2 secciones) cabe en <45s incluso si una se atora.
+        section_timeout = min(20.0, max(10.0, self.settings.timeout_ms / 1000.0 * 0.6))
 
         async def _run_section(name: str) -> tuple[str, MatchSection]:
             async with sem:
